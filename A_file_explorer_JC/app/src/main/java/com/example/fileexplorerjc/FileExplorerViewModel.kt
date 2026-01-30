@@ -27,6 +27,8 @@ data class FileExplorerState(
     val isMultiSelectMode: Boolean = false,
     val selectedFiles: Set<File> = emptySet(),
     val isLoading: Boolean = false,
+    val isRefreshing: Boolean = false,
+    val refreshSuccess: Boolean? = null,
     val storageInfo: String = "",
     val errorMessage: String? = null,
     val hasClipboardContent: Boolean = false
@@ -115,6 +117,46 @@ class FileExplorerViewModel : ViewModel() {
 
     fun refresh() {
         _state.value.currentDirectory?.let { navigateToDirectory(it) }
+    }
+
+    fun onPullRefresh() {
+        _state.value = _state.value.copy(isRefreshing = true)
+        _state.value.currentDirectory?.let { dir ->
+            if (!dir.canRead()) {
+                _state.value = _state.value.copy(
+                    isRefreshing = false,
+                    errorMessage = "无权限访问此目录"
+                )
+                return
+            }
+
+            val files = dir.listFiles()?.map { FileItem(it) }
+                ?.sortedWith(compareBy<FileItem> { !it.isDirectory }.thenBy { it.name.lowercase() })
+                ?: emptyList()
+
+            val breadcrumbs = mutableListOf<File>()
+            var current: File? = dir
+            while (current != null) {
+                breadcrumbs.add(0, current)
+                current = current.parentFile
+            }
+
+            _state.value = _state.value.copy(
+                files = files,
+                breadcrumbs = breadcrumbs,
+                isRefreshing = false,
+                refreshSuccess = true,
+                isMultiSelectMode = false,
+                selectedFiles = emptySet(),
+                hasClipboardContent = ClipboardManager.hasClipboardContent()
+            )
+        } ?: run {
+            _state.value = _state.value.copy(isRefreshing = false)
+        }
+    }
+
+    fun clearRefreshSuccess() {
+        _state.value = _state.value.copy(refreshSuccess = null)
     }
 
     fun enterMultiSelectMode(file: File) {

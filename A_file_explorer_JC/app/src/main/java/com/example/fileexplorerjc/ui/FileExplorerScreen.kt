@@ -37,6 +37,8 @@ import com.example.fileexplorerjc.FileExplorerViewModel
 import com.example.fileexplorerjc.FileItem
 import com.example.fileexplorerjc.ui.theme.FileGray
 import com.example.fileexplorerjc.ui.theme.FolderYellow
+import com.google.accompanist.swiperefresh.SwipeRefresh
+import com.google.accompanist.swiperefresh.rememberSwipeRefreshState
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,6 +71,13 @@ fun FileExplorerScreen(
         }
     }
 
+    LaunchedEffect(state.refreshSuccess) {
+        if (state.refreshSuccess == true) {
+            Toast.makeText(context, "刷新成功", Toast.LENGTH_SHORT).show()
+            viewModel.clearRefreshSuccess()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -92,9 +101,6 @@ fun FileExplorerScreen(
                 },
                 actions = {
                     if (!state.isMultiSelectMode) {
-                        IconButton(onClick = { viewModel.refresh() }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "刷新")
-                        }
                         IconButton(onClick = { showFavoritesDialog = true }) {
                             Icon(Icons.Default.Star, contentDescription = "收藏夹")
                         }
@@ -213,58 +219,64 @@ fun FileExplorerScreen(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                // 文件列表
+                // 文件列表（支持下拉刷新）
                 if (state.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
                 } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 80.dp)
+                    SwipeRefresh(
+                        state = rememberSwipeRefreshState(isRefreshing = state.isRefreshing),
+                        onRefresh = { viewModel.onPullRefresh() },
+                        modifier = Modifier.fillMaxSize()
                     ) {
-                        items(state.files, key = { it.file.absolutePath }) { fileItem ->
-                            FileItemCard(
-                                fileItem = fileItem,
-                                isSelected = state.selectedFiles.contains(fileItem.file),
-                                isMultiSelectMode = state.isMultiSelectMode,
-                                onClick = {
-                                    if (state.isMultiSelectMode) {
-                                        viewModel.toggleFileSelection(fileItem.file)
-                                    } else if (fileItem.isDirectory) {
-                                        viewModel.navigateToDirectory(fileItem.file)
-                                    } else {
-                                        // 打开文件
-                                        val ext = fileItem.file.extension.lowercase()
-                                        if (ext in listOf("txt", "log", "json", "xml", "md", "csv", "ini", "cfg", "conf", "properties", "yaml", "yml")) {
-                                            // 使用内置编辑器打开文本文件
-                                            onOpenTextFile(fileItem.file)
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 80.dp)
+                        ) {
+                            items(state.files, key = { it.file.absolutePath }) { fileItem ->
+                                FileItemCard(
+                                    fileItem = fileItem,
+                                    isSelected = state.selectedFiles.contains(fileItem.file),
+                                    isMultiSelectMode = state.isMultiSelectMode,
+                                    onClick = {
+                                        if (state.isMultiSelectMode) {
+                                            viewModel.toggleFileSelection(fileItem.file)
+                                        } else if (fileItem.isDirectory) {
+                                            viewModel.navigateToDirectory(fileItem.file)
                                         } else {
-                                            // 使用外部应用打开
-                                            try {
-                                                val uri = FileProvider.getUriForFile(
-                                                    context,
-                                                    "${context.packageName}.fileprovider",
-                                                    fileItem.file
-                                                )
-                                                val intent = Intent(Intent.ACTION_VIEW).apply {
-                                                    setDataAndType(uri, getMimeType(fileItem.file))
-                                                    flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                            // 打开文件
+                                            val ext = fileItem.file.extension.lowercase()
+                                            if (ext in listOf("txt", "log", "json", "xml", "md", "csv", "ini", "cfg", "conf", "properties", "yaml", "yml")) {
+                                                // 使用内置编辑器打开文本文件
+                                                onOpenTextFile(fileItem.file)
+                                            } else {
+                                                // 使用外部应用打开
+                                                try {
+                                                    val uri = FileProvider.getUriForFile(
+                                                        context,
+                                                        "${context.packageName}.fileprovider",
+                                                        fileItem.file
+                                                    )
+                                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                        setDataAndType(uri, getMimeType(fileItem.file))
+                                                        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                                    }
+                                                    context.startActivity(intent)
+                                                } catch (e: Exception) {
+                                                    Toast.makeText(context, "无法打开文件", Toast.LENGTH_SHORT).show()
                                                 }
-                                                context.startActivity(intent)
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, "无法打开文件", Toast.LENGTH_SHORT).show()
                                             }
                                         }
-                                    }
-                                },
-                                onLongClick = {
-                                    if (!state.isMultiSelectMode) {
-                                        viewModel.enterMultiSelectMode(fileItem.file)
-                                    }
-                                },
-                                onMoreClick = { showFileMenu = fileItem }
-                            )
+                                    },
+                                    onLongClick = {
+                                        if (!state.isMultiSelectMode) {
+                                            viewModel.enterMultiSelectMode(fileItem.file)
+                                        }
+                                    },
+                                    onMoreClick = { showFileMenu = fileItem }
+                                )
+                            }
                         }
                     }
                 }
