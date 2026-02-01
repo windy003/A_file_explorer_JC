@@ -2,6 +2,7 @@ package com.example.fileexplorerjc.ui
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -32,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.fileexplorerjc.ClipboardManager
+import com.example.fileexplorerjc.DefaultAppManager
 import com.example.fileexplorerjc.FavoritesManager
 import com.example.fileexplorerjc.FileExplorerViewModel
 import com.example.fileexplorerjc.FileItem
@@ -55,9 +57,11 @@ fun FileExplorerScreen(
     var showRenameDialog by remember { mutableStateOf<File?>(null) }
     var showDeleteDialog by remember { mutableStateOf<File?>(null) }
     var showFileMenu by remember { mutableStateOf<FileItem?>(null) }
+    var showOpenWithDialog by remember { mutableStateOf<File?>(null) }
 
     LaunchedEffect(Unit) {
         FavoritesManager.init(context)
+        DefaultAppManager.init(context)
         // 路径恢复在 MainActivity 中处理，这里只在没有初始化时才加载
         if (state.currentDirectory == null) {
             viewModel.loadInitialDirectory()
@@ -252,20 +256,11 @@ fun FileExplorerScreen(
                                                 onOpenTextFile(fileItem.file)
                                             } else {
                                                 // 使用外部应用打开
-                                                try {
-                                                    val uri = FileProvider.getUriForFile(
-                                                        context,
-                                                        "${context.packageName}.fileprovider",
-                                                        fileItem.file
-                                                    )
-                                                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                                                        setDataAndType(uri, getMimeType(fileItem.file))
-                                                        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                                    }
-                                                    context.startActivity(intent)
-                                                } catch (e: Exception) {
-                                                    Toast.makeText(context, "无法打开文件", Toast.LENGTH_SHORT).show()
-                                                }
+                                                openFileWithApp(
+                                                    context = context,
+                                                    file = fileItem.file,
+                                                    packageName = DefaultAppManager.getDefaultApp(ext)
+                                                )
                                             }
                                         }
                                     },
@@ -391,6 +386,32 @@ fun FileExplorerScreen(
                     }
                 }
                 showFileMenu = null
+            },
+            onOpenWith = {
+                showOpenWithDialog = fileItem.file
+                showFileMenu = null
+            }
+        )
+    }
+
+    // 打开方式对话框
+    showOpenWithDialog?.let { file ->
+        OpenWithDialog(
+            file = file,
+            onDismiss = { showOpenWithDialog = null },
+            onAppSelected = { packageName, setAsDefault, mimeType ->
+                val ext = file.extension.lowercase()
+                if (setAsDefault) {
+                    DefaultAppManager.setDefaultApp(ext, packageName)
+                    Toast.makeText(context, "已设为默认打开方式", Toast.LENGTH_SHORT).show()
+                }
+                openFileWithApp(context, file, packageName, mimeType)
+                showOpenWithDialog = null
+            },
+            onClearDefault = {
+                val ext = file.extension.lowercase()
+                DefaultAppManager.clearDefaultApp(ext)
+                Toast.makeText(context, "已清除默认设置", Toast.LENGTH_SHORT).show()
             }
         )
     }
@@ -434,6 +455,44 @@ fun BreadcrumbRow(
     }
 }
 
+// 图片文件扩展名列表
+private val imageExtensions = setOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "heif")
+
+/**
+ * 判断文件是否是图片
+ */
+private fun isImageFile(file: File): Boolean {
+    return file.extension.lowercase() in imageExtensions
+}
+
+/**
+ * 加载图片缩略图
+ */
+private fun loadImageThumbnail(file: File, size: Int): ImageBitmap? {
+    return try {
+        val options = android.graphics.BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+
+        // 计算缩放比例
+        val scaleFactor = maxOf(
+            options.outWidth / size,
+            options.outHeight / size,
+            1
+        )
+
+        val decodeOptions = android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = scaleFactor
+        }
+
+        val bitmap = android.graphics.BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
+        bitmap?.asImageBitmap()
+    } catch (e: Exception) {
+        null
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileItemCard(
@@ -451,6 +510,18 @@ fun FileItemCard(
         if (fileItem.file.extension.lowercase() == "apk") {
             getApkIconBitmap(context.packageManager, fileItem.file.absolutePath, 96)
         } else null
+    }
+
+    // 异步加载图片缩略图
+    var imageThumbnail by remember { mutableStateOf<ImageBitmap?>(null) }
+    val isImage = remember(fileItem.file.absolutePath) { isImageFile(fileItem.file) }
+
+    LaunchedEffect(fileItem.file.absolutePath) {
+        if (isImage && imageThumbnail == null) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                imageThumbnail = loadImageThumbnail(fileItem.file, 96)
+            }
+        }
     }
 
     Card(
@@ -480,27 +551,49 @@ fun FileItemCard(
                 )
             }
 
-            // 图标
+            // 图标/缩略图
             Surface(
                 shape = MaterialTheme.shapes.medium,
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 modifier = Modifier.size(48.dp)
             ) {
-                if (apkIconBitmap != null) {
+                when {
+                    // 显示图片缩略图
+                    isImage && imageThumbnail != null -> {
+                        Image(
+                            bitmap = imageThumbnail!!,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        )
+                    }
+                    // 图片加载中显示占位图标
+                    isImage -> {
+                        Icon(
+                            imageVector = Icons.Default.Image,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.fillMaxSize().padding(8.dp)
+                        )
+                    }
                     // 显示 APK 图标
-                    Image(
-                        bitmap = apkIconBitmap,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                    )
-                } else {
-                    Icon(
-                        imageVector = if (fileItem.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
-                        contentDescription = null,
-                        tint = if (fileItem.isDirectory) FolderYellow else FileGray,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    apkIconBitmap != null -> {
+                        Image(
+                            bitmap = apkIconBitmap,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        )
+                    }
+                    // 默认图标
+                    else -> {
+                        Icon(
+                            imageVector = if (fileItem.isDirectory) Icons.Default.Folder else Icons.Default.InsertDriveFile,
+                            contentDescription = null,
+                            tint = if (fileItem.isDirectory) FolderYellow else FileGray,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
             }
 
@@ -687,7 +780,8 @@ fun FileOptionsBottomSheet(
     onCopy: () -> Unit,
     onToggleFavorite: () -> Unit,
     onCompress: () -> Unit,
-    onExtract: () -> Unit
+    onExtract: () -> Unit,
+    onOpenWith: () -> Unit
 ) {
     val isFavorite = if (fileItem.isDirectory) FavoritesManager.isFavorite(fileItem.file.absolutePath) else false
 
@@ -705,6 +799,15 @@ fun FileOptionsBottomSheet(
                 }
             )
             Divider()
+
+            // 文件才显示"打开方式"选项
+            if (!fileItem.isDirectory) {
+                ListItem(
+                    headlineContent = { Text("打开方式") },
+                    leadingContent = { Icon(Icons.Default.Launch, contentDescription = null) },
+                    modifier = Modifier.combinedClickable(onClick = onOpenWith)
+                )
+            }
 
             ListItem(
                 headlineContent = { Text("复制") },
@@ -775,5 +878,376 @@ private fun getApkIconBitmap(packageManager: PackageManager, apkPath: String, si
         }
     } catch (e: Exception) {
         null
+    }
+}
+
+/**
+ * 文件类型枚举
+ */
+enum class FileOpenType(val label: String, val mimeType: String, val icon: @Composable () -> Unit) {
+    TEXT("文本", "text/*", { Icon(Icons.Default.Description, contentDescription = null) }),
+    IMAGE("图片", "image/*", { Icon(Icons.Default.Image, contentDescription = null) }),
+    VIDEO("视频", "video/*", { Icon(Icons.Default.Movie, contentDescription = null) }),
+    AUDIO("音频", "audio/*", { Icon(Icons.Default.MusicNote, contentDescription = null) }),
+    APPLICATION("应用/其他", "application/*", { Icon(Icons.Default.Apps, contentDescription = null) }),
+    ALL("全部类型", "*/*", { Icon(Icons.Default.MoreHoriz, contentDescription = null) })
+}
+
+/**
+ * 获取可以打开指定 MIME 类型的应用列表
+ */
+private fun getAppsForMimeType(context: android.content.Context, file: File, mimeType: String): List<ResolveInfo> {
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        file
+    )
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mimeType)
+        flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+    }
+    // 使用 MATCH_ALL 获取所有可以处理此 Intent 的应用，而不仅仅是默认应用
+    val apps = context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+    // 去重（同一个包名可能有多个 Activity）
+    return apps.distinctBy { it.activityInfo.packageName }
+}
+
+/**
+ * 使用指定应用和 MIME 类型打开文件
+ */
+private fun openFileWithApp(context: android.content.Context, file: File, packageName: String?, mimeType: String? = null) {
+    try {
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+        val actualMimeType = mimeType ?: getMimeType(file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, actualMimeType)
+            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            if (packageName != null) {
+                setPackage(packageName)
+            }
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        val ext = file.extension.lowercase()
+        if (packageName != null && DefaultAppManager.hasDefaultApp(ext)) {
+            DefaultAppManager.clearDefaultApp(ext)
+            Toast.makeText(context, "默认应用无法打开，已清除设置", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "无法打开文件", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
+/**
+ * 打开方式全屏对话框 - 两步选择：先选类型，再选应用
+ */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+fun OpenWithDialog(
+    file: File,
+    onDismiss: () -> Unit,
+    onAppSelected: (packageName: String, setAsDefault: Boolean, mimeType: String) -> Unit,
+    onClearDefault: () -> Unit
+) {
+    val context = LocalContext.current
+    val ext = file.extension.lowercase()
+    val currentDefault = remember(ext) { DefaultAppManager.getDefaultApp(ext) }
+
+    // 当前选择的文件类型，null 表示还在选择类型阶段
+    var selectedType by remember { mutableStateOf<FileOpenType?>(null) }
+    var setAsDefault by remember { mutableStateOf(false) }
+
+    // 根据选择的类型获取应用列表
+    val apps = remember(selectedType) {
+        selectedType?.let { getAppsForMimeType(context, file, it.mimeType) } ?: emptyList()
+    }
+
+    // 全屏对话框
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(if (selectedType == null) "选择打开类型" else "选择应用")
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = {
+                            if (selectedType != null) {
+                                selectedType = null
+                            } else {
+                                onDismiss()
+                            }
+                        }) {
+                            Icon(
+                                if (selectedType != null) Icons.Default.ArrowBack else Icons.Default.Close,
+                                contentDescription = if (selectedType != null) "返回" else "关闭"
+                            )
+                        }
+                    },
+                    actions = {
+                        if (currentDefault != null && selectedType == null) {
+                            TextButton(onClick = { onClearDefault() }) {
+                                Text("清除默认")
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+            }
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
+                // 文件名显示
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.InsertDriveFile,
+                            contentDescription = null,
+                            tint = FileGray,
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                file.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "扩展名: ${if (ext.isNotEmpty()) ext else "无"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                // 当前默认应用提示
+                if (currentDefault != null && selectedType == null) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                "已设置默认打开应用",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                }
+
+                if (selectedType == null) {
+                    // 第一步：选择文件类型
+                    Text(
+                        "以什么类型打开此文件？",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(FileOpenType.entries.toList()) { type ->
+                            ListItem(
+                                headlineContent = {
+                                    Text(
+                                        type.label,
+                                        style = MaterialTheme.typography.bodyLarge
+                                    )
+                                },
+                                supportingContent = {
+                                    Text(
+                                        type.mimeType,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                },
+                                leadingContent = {
+                                    Surface(
+                                        shape = MaterialTheme.shapes.medium,
+                                        color = MaterialTheme.colorScheme.secondaryContainer,
+                                        modifier = Modifier.size(48.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            type.icon()
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.combinedClickable(
+                                    onClick = { selectedType = type }
+                                )
+                            )
+                            Divider(modifier = Modifier.padding(start = 80.dp))
+                        }
+                    }
+                } else {
+                    // 第二步：选择应用
+                    if (apps.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Default.SearchOff,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    "没有可以打开此类型的应用",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    } else {
+                        // 设为默认选项
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(onClick = { setAsDefault = !setAsDefault })
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                        ) {
+                            Checkbox(
+                                checked = setAsDefault,
+                                onCheckedChange = { setAsDefault = it }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "设为此类型文件的默认打开方式",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+
+                        Divider()
+
+                        Text(
+                            "共 ${apps.size} 个可用应用",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                        )
+
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(apps) { resolveInfo ->
+                                val packageName = resolveInfo.activityInfo.packageName
+                                val appName = resolveInfo.loadLabel(context.packageManager).toString()
+                                val appIcon = remember(packageName) {
+                                    try {
+                                        resolveInfo.loadIcon(context.packageManager)
+                                            .toBitmap(96, 96, Bitmap.Config.ARGB_8888)
+                                            .asImageBitmap()
+                                    } catch (e: Exception) {
+                                        null
+                                    }
+                                }
+                                val isCurrentDefault = packageName == currentDefault
+
+                                ListItem(
+                                    headlineContent = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                appName,
+                                                style = MaterialTheme.typography.bodyLarge
+                                            )
+                                            if (isCurrentDefault) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Surface(
+                                                    shape = MaterialTheme.shapes.small,
+                                                    color = MaterialTheme.colorScheme.primaryContainer
+                                                ) {
+                                                    Text(
+                                                        "默认",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    },
+                                    supportingContent = {
+                                        Text(
+                                            packageName,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    },
+                                    leadingContent = {
+                                        if (appIcon != null) {
+                                            Image(
+                                                bitmap = appIcon,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(48.dp)
+                                            )
+                                        } else {
+                                            Icon(
+                                                Icons.Default.Apps,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(48.dp)
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier.combinedClickable(
+                                        onClick = { onAppSelected(packageName, setAsDefault, selectedType!!.mimeType) }
+                                    )
+                                )
+                                Divider(modifier = Modifier.padding(start = 80.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
