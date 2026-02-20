@@ -6,9 +6,12 @@ import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -40,6 +43,14 @@ class FileExplorerViewModel : ViewModel() {
     val state: StateFlow<FileExplorerState> = _state.asStateFlow()
 
     private var isInitialized = false
+
+    init {
+        ClipboardManager.hasContentFlow
+            .onEach { hasContent ->
+                _state.value = _state.value.copy(hasClipboardContent = hasContent)
+            }
+            .launchIn(viewModelScope)
+    }
 
     fun loadInitialDirectory() {
         if (isInitialized) return
@@ -102,8 +113,7 @@ class FileExplorerViewModel : ViewModel() {
             breadcrumbs = breadcrumbs,
             isLoading = false,
             isMultiSelectMode = false,
-            selectedFiles = emptySet(),
-            hasClipboardContent = ClipboardManager.hasClipboardContent()
+            selectedFiles = emptySet()
         )
     }
 
@@ -147,8 +157,7 @@ class FileExplorerViewModel : ViewModel() {
                 isRefreshing = false,
                 refreshSuccess = true,
                 isMultiSelectMode = false,
-                selectedFiles = emptySet(),
-                hasClipboardContent = ClipboardManager.hasClipboardContent()
+                selectedFiles = emptySet()
             )
         } ?: run {
             _state.value = _state.value.copy(isRefreshing = false)
@@ -197,7 +206,6 @@ class FileExplorerViewModel : ViewModel() {
         if (selectedFiles.isNotEmpty()) {
             ClipboardManager.copyFiles(selectedFiles)
             exitMultiSelectMode()
-            _state.value = _state.value.copy(hasClipboardContent = true)
         }
     }
 
@@ -206,7 +214,6 @@ class FileExplorerViewModel : ViewModel() {
         if (selectedFiles.isNotEmpty()) {
             ClipboardManager.cutFiles(selectedFiles)
             exitMultiSelectMode()
-            _state.value = _state.value.copy(hasClipboardContent = true)
         }
     }
 
@@ -234,7 +241,6 @@ class FileExplorerViewModel : ViewModel() {
 
         if (isCut) ClipboardManager.clear()
         refresh()
-        _state.value = _state.value.copy(hasClipboardContent = ClipboardManager.hasClipboardContent())
         return Result.success(successCount)
     }
 
