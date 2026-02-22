@@ -916,6 +916,17 @@ private fun getAppsForMimeType(context: android.content.Context, file: File, mim
  * 使用指定应用和 MIME 类型打开文件
  */
 private fun openFileWithApp(context: android.content.Context, file: File, packageName: String?, mimeType: String? = null) {
+    // APK 文件需要先检查"安装未知应用"权限
+    if (file.extension.lowercase() == "apk" && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            Toast.makeText(context, "请在设置中允许'安装未知应用'", Toast.LENGTH_LONG).show()
+            val settingsIntent = Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                data = android.net.Uri.parse("package:${context.packageName}")
+            }
+            context.startActivity(settingsIntent)
+            return
+        }
+    }
     try {
         val uri = FileProvider.getUriForFile(
             context,
